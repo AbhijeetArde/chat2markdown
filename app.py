@@ -1,5 +1,10 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, send_file
 import markdown
+from docx import Document
+import io
+from markdown.treeprocessors import Treeprocessor
+from markdown.extensions import Extension
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -169,15 +174,20 @@ result_html = """
     <main>
         <div class="container">
             <h3>Markdown Output:</h3>
-            <div id="markdown-output">{{ md_output | safe }}</div>
+            <pre>{{ md_output | safe }}</pre>
             <button class="copy-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
+            <br><br>
+            <form action="/download" method="POST">
+                <input type="hidden" name="markdown_content" value="{{ md_output | escape }}"/>
+                <button class="copy-btn" type="submit">Download as DOC</button>
+            </form>
             <br><br>
             <a href="/">Go Back</a>
         </div>
     </main>
     <script>
         function copyToClipboard() {
-            var copyText = document.getElementById("markdown-output");
+            var copyText = document.querySelector("pre");
             var range = document.createRange();
             range.selectNode(copyText);
             window.getSelection().removeAllRanges();
@@ -189,6 +199,95 @@ result_html = """
 </body>
 </html>
 """
+
+# Custom markdown extension for handling tables and other elements
+class TableExtension(Extension):
+    def extendMarkdown(self, md):
+        md.treeprocessors.register(TableProcessor(md), 'table', 25)
+
+class TableProcessor(Treeprocessor):
+    def run(self, root):
+        for element in root.findall('.//table'):
+            # Convert tables into docx format
+            self.convert_table(element)
+
+    def convert_table(self, table_element):
+        # Create a table in the DOCX document
+        table = self.doc.add_table(rows=0, cols=0)
+        for row in table_element.findall('.//tr'):
+            row_cells = table.add_row().cells
+            for i, cell in enumerate(row.findall('.//td')):
+                row_cells[i].text = cell.text
+
+# Function to convert markdown to DOCX
+def convert_markdown_to_docx(md_content):
+    # Create a DOCX document
+    doc = Document()
+    
+    # Convert the markdown to HTML first
+    html_content = markdown.markdown(md_content, extensions=[TableExtension()])
+    
+    # Add a heading to the document
+    doc.add_heading('Converted Chat to Markdown', 0)
+    
+    # Parse HTML and insert content (tables, headers, paragraphs, etc.)
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Handling paragraphs
+    for p in soup.find_all('p'):
+        doc.add_paragraph(p.get_text())
+    
+    # Handling tables
+    for table in soup.find_all('table'):
+        # Determine the number of columns by looking at the first row
+        rows = table.find_all('tr')
+        num_columns = max(len(row.find_all(['td', 'th'])) for row in rows)  # Find the maximum column count
+        
+        # Create a table with the calculated number of columns
+        table_doc = doc.add_table(rows=0, cols=num_columns)
+        
+        for row in rows:
+            row_cells = table_doc.add_row().cells
+            cells = row.find_all(['td', 'th'])
+            for i, cell in enumerate(cells):
+                if i < num_columns:  # Ensure we don't go out of range
+                    row_cells[i].text = cell.get_text()
+
+    # Save the document to a BytesIO stream
+    doc_io = io.BytesIO()
+    doc.save(doc_io)
+    doc_io.seek(0)
+    return doc_io
+
+    # Create a DOCX document
+    doc = Document()
+    
+    # Convert the markdown to HTML first
+    html_content = markdown.markdown(md_content, extensions=[TableExtension()])
+    
+    # Add a heading to the document
+    doc.add_heading('Converted Chat to Markdown', 0)
+    
+    # Parse HTML and insert content (tables, headers, paragraphs, etc.)
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Handling paragraphs
+    for p in soup.find_all('p'):
+        doc.add_paragraph(p.get_text())
+    
+    # Handling tables
+    for table in soup.find_all('table'):
+        table_doc = doc.add_table(rows=0, cols=0)
+        for row in table.find_all('tr'):
+            row_cells = table_doc.add_row().cells
+            for i, cell in enumerate(row.find_all(['td', 'th'])):
+                row_cells[i].text = cell.get_text()
+
+    # Save the document to a BytesIO stream
+    doc_io = io.BytesIO()
+    doc.save(doc_io)
+    doc_io.seek(0)
+    return doc_io
 
 # Route for the home page
 @app.route('/')
@@ -205,6 +304,17 @@ def convert_to_markdown():
     
     # Render the result with the safe HTML output
     return render_template_string(result_html, md_output=md_output)
+
+# Route to handle DOCX file download
+@app.route('/download', methods=['POST'])
+def download_docx():
+    markdown_content = request.form['markdown_content']
+    
+    # Convert markdown content to DOCX
+    docx_io = convert_markdown_to_docx(markdown_content)
+    
+    # Send the DOCX file for download
+    return send_file(docx_io, as_attachment=True, download_name="converted_chat.docx", mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 if __name__ == '__main__':
     app.run(debug=True)
